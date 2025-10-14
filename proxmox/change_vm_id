@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+#set -x
+
+function usage() {
+    echo "Usage: $0 <old_vm_id> <new_vm_id>"
+    echo "Example: $0 100 200"
+    exit 1
+}
+
+if [ $# -ne 2 ]; then
+    echo "Error: invalid number of arguments"
+    usage
+fi
+
+vmid=$1
+new_vmid=$2
+
+qemu_dir=/etc/pve/qemu-server
+vg_name=$(lvs -o lv_name,vg_name | grep $vmid | awk '{ print $2 }' | uniq -d)
+
+# Check if VM is running
+vm_status=$(qm status $vmid | awk '{ print $2 }')
+if [ "$vm_status"=="running" ]; then
+    echo "VM ID $vmid is currently running. Please stop the VM before attempting to change VM IDs."
+    exit 2
+fi
+
+# Identify disks associated with the VM and rename them
+vm_disks=$(qm config ${vmid} | grep -E "^scsi|disk" | awk -F '[:,]' '{ print $3 }')
+for disk in $vm_disks; do
+    echo Renaming VM disk $disk
+    new_disk_name=$(echo $disk | sed s/${vmid}/${new_vmid}/)
+    echo lvrename $vg_name/$disk $new_disk_name
+done
+
+# Update VM configuration file
+echo sed -i "s/$vmid/$new_vmid/g" ${qemu_dir}/$vmid.conf
+
+# Rename VM configuration file
+echo mv $qemu_dir/$vmid.conf $qemu_dir/$new_vmid.conf
