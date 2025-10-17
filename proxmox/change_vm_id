@@ -39,3 +39,6 @@ echo sed -i "s/$vmid/$new_vmid/g" ${qemu_dir}/$vmid.conf
 
 # Rename VM configuration file
 echo mv $qemu_dir/$vmid.conf $qemu_dir/$new_vmid.conf
+
+# Update any jobs referencing the VM
+echo sed -i "/vmid/ s/${vmid}/${new_vmid}/g" /etc/pve/jobs.cfg
