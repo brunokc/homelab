@@ -1,0 +1,3 @@
+# Desired CPU scaling governor
+# Common values: conservative ondemand userspace powersave performance schedutil
+GOVERNOR=schedutil

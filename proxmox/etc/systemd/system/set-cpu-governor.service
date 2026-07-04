@@ -1,0 +1,15 @@
+[Unit]
+Description=Set CPU scaling governor from /etc/default/cpu-governor
+After=multi-user.target
+ConditionPathExists=/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+ConditionPathExists=/etc/default/cpu-governor
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/cpu-governor
+ExecStart=/bin/sh -c 'echo "$GOVERNOR" | /usr/bin/tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null'
+ExecStart=/bin/sh -c 'echo "Set CPU governor to $GOVERNOR"'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
