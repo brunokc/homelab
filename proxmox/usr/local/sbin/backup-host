@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+export PBS_REPOSITORY=pbs:NAS
+export PBS_PASSWORD_FILE=$(dirname $0)/pbs-backup-server-password
+
+#proxmox-backup-client login
+proxmox-backup-client backup root.pxar:/ etc-pve.pxar:/etc/pve
