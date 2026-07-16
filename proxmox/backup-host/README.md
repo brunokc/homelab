@@ -4,7 +4,11 @@ Uses proxmox-backup-client to backup a proxmox (PVE) host
 
 ## Installation
 
-Copy the files in this directory to your host starting from the root (/)
+Copy the files in this directory to your host starting from the root (/):
+
+```bash
+cp -a . /
+```
 
 Adjust settings in /etc/default/pbs-host-backup
 
@@ -34,5 +38,7 @@ Assuming your have the backup store already registered in your proxmox server:
 5. Back on your host, create (or edit) file /usr/local/etc/pbs-host-backup-token
    and paste the token (the Secret from step 3.1 above) as the first line of that
    file.
-6. Reload systemd so it will see the new host backup service you just installed
+6. Reload systemd so it will see the new host backup service you just installed:
    `systemctl daemon-reload`
+
+You're done!
