@@ -1,0 +1,9 @@
+# Expects PBS_REPOSITORY and PBS_PASSWORD{_FD,_FILE,_CMD} to be set.
+# Also set the archive:path combinations to be backed up in BACKUP_HOST_DIRS
+
+PBS_REPOSITORY='root@pam!pve03Backup@pbs:NAS'
+PBS_PASSWORD_FILE=/usr/local/etc/pbs-host-backup-token
+
+BACKUP_HOST_DIRS='root.pxar:/ etc-pve.pxar:/etc/pve'
+
+BACKUP_REPORT_EMAIL_ADDRESS=sysadmin@kraychete.com

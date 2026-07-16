@@ -1,0 +1,18 @@
+#!/bin/bash
+set -o pipefail
+
+LOGFILE=$(mktemp)
+trap 'rm -f "$LOGFILE"' EXIT
+
+/usr/bin/proxmox-backup-client backup $BACKUP_HOST_DIRS >"$LOGFILE" 2>&1
+STATUS=$?
+
+if [ $STATUS -eq 0 ]; then
+    SUBJECT="[$(hostname)] Host backup SUCCEEDED"
+else
+    SUBJECT="[$(hostname)] Host backup FAILED (exit $STATUS)"
+fi
+
+mail -s "$SUBJECT" "${BACKUP_REPORT_EMAIL_ADDRESS:-root@localhost}" <"$LOGFILE"
+
+exit $STATUS

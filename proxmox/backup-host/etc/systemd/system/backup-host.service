@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily host backups
+ConditionACPower=true
+After=network.target network-online.target systemd-networkd.service NetworkManager.service connman.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=6h
+EnvironmentFile=/etc/default/pbs-host-backup
+ExecStart=/usr/local/sbin/backup-host
+
+[Install]
+WantedBy=multi-user.target
