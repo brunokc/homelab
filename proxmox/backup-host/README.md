@@ -38,7 +38,9 @@ Assuming your have the backup store already registered in your proxmox server:
 5. Back on your host, create (or edit) file /usr/local/etc/pbs-host-backup-token
    and paste the token (the Secret from step 3.1 above) as the first line of that
    file.
-6. Reload systemd so it will see the new host backup service you just installed:
-   `systemctl daemon-reload`
+6. Enable the service:
+   `systemctl enable backup-host.service`
+7. Enable the timer and start it:
+   `systemctl enable --now backup-host.timer`
 
 You're done!
