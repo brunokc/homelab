@@ -7,7 +7,7 @@ CPU governor system service that sets the governor policy at start-up time.
 1. Copy the files in this directory to your host starting from the root (/):
 
 ```bash
-cp -a . /
+cp -aruv . /
 ```
 
 2. Adjust your settings in /etc/default/cpu-governor

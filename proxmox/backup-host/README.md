@@ -7,7 +7,7 @@ Uses proxmox-backup-client to backup a proxmox (PVE) host
 Copy the files in this directory to your host starting from the root (/):
 
 ```bash
-cp -a . /
+cp -aruv . /
 ```
 
 Adjust settings in /etc/default/pbs-host-backup
