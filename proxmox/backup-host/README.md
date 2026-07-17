@@ -4,13 +4,25 @@ Uses proxmox-backup-client to backup a proxmox (PVE) host
 
 ## Installation
 
-Copy the files in this directory to your host starting from the root (/):
+1. Copy the files in this directory to your host starting from the root (/):
 
 ```bash
 cp -aruv . /
 ```
 
-Adjust settings in /etc/default/pbs-host-backup
+2. Adjust settings in /etc/default/pbs-host-backup
+
+3. Fix permissions to the token file:
+
+   `chmod 600 /usr/local/etc/pbs-host-backup-token`
+
+3. Enable the service:
+
+   `systemctl enable backup-host.service`
+
+4. Enable the timer and start it:
+
+   `systemctl enable --now backup-host.timer`
 
 ## Configuration
 
@@ -32,15 +44,12 @@ Assuming your have the backup store already registered in your proxmox server:
    1. Select /datastore or /datastore/<name> under Path
    2. Select your recently create token under API Token
    3. Under Role, select DatabaseBackup
-   4. Select the Propagate checkbox, especially if you have selected /datastore
-      under Path, so the script will have access to any datastore.
+   4. Ensure that the Propagate checkbox is checked, especially if you have 
+      selected /datastore under Path, so the script will have access to any 
+      datastore.
    5. Take note of the token (copy it) to be used in the next step
 5. Back on your host, create (or edit) file /usr/local/etc/pbs-host-backup-token
    and paste the token (the Secret from step 3.1 above) as the first line of that
    file.
-6. Enable the service:
-   `systemctl enable backup-host.service`
-7. Enable the timer and start it:
-   `systemctl enable --now backup-host.timer`
 
 You're done!
