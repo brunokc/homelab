@@ -4,7 +4,9 @@ set -o pipefail
 LOGFILE=$(mktemp)
 trap 'rm -f "$LOGFILE"' EXIT
 
-/usr/bin/proxmox-backup-client backup $BACKUP_HOST_DIRS >"$LOGFILE" 2>&1
+cmd="/usr/bin/proxmox-backup-client backup $BACKUP_HOST_DIRS"
+echo "Running: ${cmd}" >"$LOGFILE"
+eval "${cmd}" >"$LOGFILE" 2>&1
 STATUS=$?
 
 if [ $STATUS -eq 0 ]; then
