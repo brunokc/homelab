@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import requests
+
+NTFY_URL = "https://ntfy.sh/"
+NTFY_CHANNEL = "desklabio-homelab"
+
+def send_ntfy(title, message, priority=3, tags=None, icon=None):
+    data = {
+        "topic": NTFY_CHANNEL,
+        "title": title,
+        "message": message,
+        "priority": priority,
+    }
+
+    if tags:
+        data["tags"] = tags
+
+    if icon:
+        data["icon"] = icon
+
+    requests.post(NTFY_URL, data=json.dumps(data))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="UPS event notifier using Ntfy")
+    parser.add_argument("status", choices=["online", "onbatt", "lowbatt"], help="status to notify on")
+    args = parser.parse_args()
+
+    upsname = os.environ.get("UPSNAME")
+    if not upsname:
+        print("No UPS name available (UPSNAME variable not set)")
+        exit(1)
+
+    icon = "https://avatars.githubusercontent.com/u/3526263?s=200&v=4"
+
+    if args.status == "online":
+        title = f"Power Is Back"
+        message = f"Power is back online for UPS {upsname}"
+        priority = 3
+        tags = ["electric_plug", "battery"]
+    elif args.status == "onbatt":
+        title = f"Lost Power"
+        message = f"UPS {upsname} lost power!"
+        priority = 4
+        tags = ["warning"]
+    elif args.status == "lowbatt":
+        title = f"🪫Battery Low"
+        message = f"UPS {upsname} battery is low! Shutdown imminent!"
+        priority = 5
+        tags = ["rotating_light"]
+    else:
+        print(f"Unsupported status \"{status}\"")
+        exit(1)
+
+    send_ntfy(title, message, priority=priority, tags=tags, icon=icon)
+    print("Notification sent.")
+
+
+if __name__ == "__main__":
+    main()
