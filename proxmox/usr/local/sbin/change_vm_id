@@ -1,44 +1,404 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
+"""
+Rename a Proxmox VM's ID: renames its LVM disks, updates/renames its
+qemu-server config file, and updates references in jobs.cfg.
 
-#set -x
+Usage:
+    rename_vm.py [--dry-run] <old_vm_id> <new_vm_id>
 
-function usage() {
-    echo "Usage: $0 <old_vm_id> <new_vm_id>"
-    echo "Example: $0 100 200"
-    exit 1
-}
+Example:
+    rename_vm.py 100 200
+    rename_vm.py --dry-run 100 200
+"""
 
-if [ $# -ne 2 ]; then
-    echo "Error: invalid number of arguments"
-    usage
-fi
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
-vmid=$1
-new_vmid=$2
+VMConfigDiskRe = re.compile(r"(?:^scsi\d+|disk\d+): ([^,]+)")
 
-qemu_dir=/etc/pve/qemu-server
-vg_name=$(lvs -o lv_name,vg_name | grep $vmid | awk '{ print $2 }' | uniq -d)
 
-# Check if VM is running
-vm_status=$(qm status $vmid | awk '{ print $2 }')
-if [ "$vm_status"=="running" ]; then
-    echo "VM ID $vmid is currently running. Please stop the VM before attempting to change VM IDs."
-    exit 2
-fi
+class LvmDiskMapping:
+    """A mapping of LVM disk names to their volume group names."""
 
-# Identify disks associated with the VM and rename them
-vm_disks=$(qm config ${vmid} | grep -E "^scsi|disk" | awk -F '[:,]' '{ print $3 }')
-for disk in $vm_disks; do
-    echo Renaming VM disk $disk
-    new_disk_name=$(echo $disk | sed s/${vmid}/${new_vmid}/)
-    echo lvrename $vg_name/$disk $new_disk_name
-done
+    def __init__(self):
+        self._mapping = self._get_lvm_vg_mapping()
 
-# Update VM configuration file
-echo sed -i "s/$vmid/$new_vmid/g" ${qemu_dir}/$vmid.conf
+    @staticmethod
+    def _get_lvm_vg_mapping():
+        """Return the system disk/vg mapping."""
+        output = capture_optional(["lvs", "-o", "lv_name,vg_name", "--noheadings"])
+        if not output:
+            return None
 
-# Rename VM configuration file
-echo mv $qemu_dir/$vmid.conf $qemu_dir/$new_vmid.conf
+        mapping = {}
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                mapping[parts[0]] = parts[1]
+        return mapping
 
-# Update any jobs referencing the VM
-echo sed -i "/vmid/ s/${vmid}/${new_vmid}/g" /etc/pve/jobs.cfg
+
+    def get_vg_for_disk(self, disk):
+        """Return the volume group name containing an LV named exactly like `disk`."""
+        return self._mapping.get(disk)
+
+
+class ZfsDataset:
+    """A representation of a ZFS dataset."""
+
+    def __init__(self, name):
+        self._name = name
+
+    @property
+    def name(self):
+        """Return the full dataset name."""
+        return self._name
+
+    @property
+    def parent(self):
+        """Return the parent dataset name, or None if this is a top-level dataset."""
+        if "/" in self._name:
+            return self._name.rsplit("/", 1)[0]
+        return None
+
+    @property
+    def disk_name(self):
+        """Return the last component of the dataset name (the disk name)."""
+        return self._name.rsplit("/", 1)[-1]
+
+
+class ZfsDiskMapping:
+    """A mapping of ZFS dataset names to their full dataset paths."""
+
+    def __init__(self):
+        self._mapping = self._get_zfs_dataset_mapping()
+
+    @staticmethod
+    def _get_zfs_dataset_mapping():
+        """Return the system disk/dataset mapping."""
+        output = capture_optional(["zfs", "list", "-H", "-o", "name"])
+        if not output:
+            return None
+
+        mapping = {}
+        for line in output.splitlines():
+            dataset = line.strip()
+            disk_name = dataset.rsplit("/", 1)[-1]  # Get the last component
+            mapping[disk_name] = dataset
+        return mapping
+
+    def get_dataset_for_disk(self, disk):
+        """Return full ZFS dataset path if a dataset/volume ends with the disk name."""
+        dataset = self._mapping.get(disk)
+        if dataset:
+            return ZfsDataset(dataset)
+        return None
+
+
+class VmDiskRenamer:
+    """Handles renaming of VM disks, whether on LVM or ZFS."""
+
+    def __init__(self, vm_id, dry_run=False):
+        self._vm_id = vm_id
+        self._dry_run = dry_run
+        self._lvm_mapping = LvmDiskMapping()
+        self._zfs_mapping = ZfsDiskMapping()
+
+    def _get_vm_disks(self, vmid):
+        output = capture(["qm", "config", vmid])
+        disks = {}
+        for line in output.splitlines():
+            match = VMConfigDiskRe.search(line)
+            if match:
+                disk_ref = match.group(1).strip()
+                if ":" not in disk_ref:
+                    continue
+                storage, disk_and_opts = disk_ref.split(":", 1)
+                disk = disk_and_opts.split(",", 1)[0].strip()
+                disks[disk] = {"storage": storage.strip()}
+        return disks
+
+    # def _find_lvm_vg_for_disk(self, disk):
+    #     """Return the volume group name containing an LV named exactly like `disk`."""
+    #     output = capture_optional(["lvs", "-o", "lv_name,vg_name", "--noheadings"])
+    #     if not output:
+    #         return None
+
+    #     for line in output.splitlines():
+    #         parts = line.split()
+    #         if len(parts) >= 2 and parts[0] == disk:
+    #             return parts[1]
+    #     return None
+
+    # def _find_zfs_dataset_for_disk(self, disk):
+    #     """Return full ZFS dataset path if a dataset/volume ends with the disk name."""
+    #     output = capture_optional(["zfs", "list", "-H", "-o", "name"])
+    #     if not output:
+    #         return None
+
+    #     suffix = f"/{disk}"
+    #     for line in output.splitlines():
+    #         dataset = line.strip()
+    #         if dataset == disk or dataset.endswith(suffix):
+    #             return dataset
+    #     return None
+
+    def _rename_disk(self, disk, new_disk_name):
+        """Rename a VM disk by auto-detecting whether it is on LVM or ZFS."""
+        vg_name = self._lvm_mapping.get_vg_for_disk(disk)
+        if vg_name:
+            run(
+                ["lvrename", vg_name, disk, new_disk_name],
+                f"rename LV {disk} to {new_disk_name} in VG {vg_name}",
+                self._dry_run,
+            )
+            return
+
+        zfs_dataset = self._zfs_mapping.get_dataset_for_disk(disk)
+        if zfs_dataset:
+            parent = zfs_dataset.parent
+            new_dataset = f"{parent}/{new_disk_name}" if parent else new_disk_name
+            run(
+                ["zfs", "rename", zfs_dataset.name, new_dataset],
+                f"rename ZFS dataset {zfs_dataset.name} to {new_dataset}",
+                self._dry_run,
+            )
+            return
+
+        print(
+            f"  Skipping disk {disk}: could not determine whether it is on LVM or ZFS",
+            file=sys.stderr,
+        )
+
+    def rename_disks(self, new_vm_id):
+        """Rename all disks associated with the VM to use the new VM ID."""
+        vm_disks = self._get_vm_disks(self._vm_id)
+        for disk in vm_disks:
+            new_disk_name = disk.replace(str(self._vm_id), str(new_vm_id))
+            print(f"{'Would rename' if self._dry_run else 'Renaming'} VM disk {disk} -> {new_disk_name}")
+            self._rename_disk(disk, new_disk_name)
+
+
+class VmConfigUpdater:
+    """Handles updating VM configuration files."""
+
+    QEMU_DIR = Path("/etc/pve/qemu-server")
+    JOBS_CFG = Path("/etc/pve/jobs.cfg")
+
+    def __init__(self, vm_id, dry_run=False):
+        self._vm_id = vm_id
+        self._config_path = self.QEMU_DIR / f"{vm_id}.conf"
+        self._dry_run = dry_run
+
+    def _update_vm_config(self, new_vmid):
+        """
+        Replace a string in a file and save the result. It's equivalent to
+        `sed -i "s/old/new/g" path` but done in Python.
+
+        If line_filter is given, only lines containing that substring are
+        eligible for replacement (equivalent to `sed -i "/line_filter/ s/.../.../g"`).
+
+        Returns True if the file was (or, in dry-run mode, would be) changed.
+        """
+        new_config_path = self.QEMU_DIR / f"{new_vmid}.conf"
+        if not self._config_path.exists():
+            print(f"Warning: {self._config_path} not found", file=sys.stderr)
+            return False
+
+        lines = self._config_path.read_text().splitlines(keepends=True)
+        changed = False
+        for i, line in enumerate(lines):
+            match = VMConfigDiskRe.search(line)
+            if match:
+                lines[i] = line.replace(str(self._vm_id), str(new_vmid))
+                if self._dry_run:
+                    print(f"[DRY-RUN] Would replace '{self._vm_id}' with '{new_vmid}' in line: {line.strip()}", file=sys.stderr)
+                changed = True
+
+        if not changed:
+            return False
+
+        new_config = Path(new_config_path)
+        if self._dry_run:
+            print(f"[DRY-RUN] Would save changes replacing '{self._vm_id}' with '{new_vmid}' into {new_config}")
+        else:
+            new_config.write_text("".join(lines))
+            print(f"Updated '{self._vm_id}' -> '{new_vmid}' in {new_config}")
+
+        return True
+
+    def _update_jobs_config(self, new_vmid, line_filter=None):
+        """
+        Replace a string in a file and save the result. It's equivalent to
+        `sed -i "s/old/new/g" path` but done in Python.
+
+        If line_filter is given, only lines containing that substring are
+        eligible for replacement (equivalent to `sed -i "/line_filter/ s/.../.../g"`).
+
+        Returns True if the file was (or, in dry-run mode, would be) changed.
+        """
+        path = Path(self.JOBS_CFG)
+        if not path.exists():
+            print(f"Warning: {path} not found", file=sys.stderr)
+            return False
+
+        lines = path.read_text().splitlines(keepends=True)
+        changed = False
+        for i, line in enumerate(lines):
+            if line_filter is not None and line_filter not in line:
+                continue
+            if str(self._vm_id) in line:
+                lines[i] = line.replace(str(self._vm_id), str(new_vmid))
+                if self._dry_run:
+                    print(f"[DRY-RUN] Would replace '{self._vm_id}' with '{new_vmid}' in line: {line.strip()}", file=sys.stderr)
+                changed = True
+
+        if not changed:
+            return False
+
+        if self._dry_run:
+            scope = f"lines containing '{line_filter}' in" if line_filter else "in"
+            print(f"[DRY-RUN] Would replace '{self._vm_id}' with '{new_vmid}' {scope} {path}")
+        else:
+            path.write_text("".join(lines))
+            print(f"Updated '{self._vm_id}' -> '{new_vmid}' in {path}")
+
+        return True
+
+
+    def update_vm_id(self, new_vmid):
+        self._update_vm_config(new_vmid)
+        self._update_jobs_config(new_vmid, line_filter="vmid")
+
+
+def run(cmd, description, dry_run):
+    """Run (or, in dry-run mode, just describe) an external command."""
+    if dry_run:
+        print(f"[DRY-RUN] Would run: {' '.join(cmd)}  ({description})")
+        return None
+    print(f"Running: {' '.join(cmd)}  ({description})")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error running {' '.join(cmd)}: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(result.returncode)
+    return result.stdout
+
+
+def capture(cmd):
+    """Run a command and return stdout, regardless of dry-run (read-only)."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error running {' '.join(cmd)}: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(result.returncode)
+    return result.stdout
+
+
+def capture_optional(cmd):
+    """Run a probe command and return stdout, or None if it fails."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def get_vm_status(vmid):
+    """Equivalent of: qm status $vmid | awk '{print $2}'"""
+    output = capture(["qm", "status", vmid])
+    parts = output.split()
+    return parts[1] if len(parts) >= 2 else ""
+
+
+# def rename_vm_disk(disk, new_disk_name, dry_run):
+#     """Rename VM disk by auto-detecting whether it is on LVM or ZFS."""
+#     vg_mapping = LvmDiskMapping()
+#     vg_name = vg_mapping.get_vg_for_disk(disk)
+#     if vg_name:
+#         run(
+#             ["lvrename", vg_name, disk, new_disk_name],
+#             f"rename LV {disk} to {new_disk_name} in VG {vg_name}",
+#             dry_run,
+#         )
+#         return
+
+#     zfs_dataset = find_zfs_dataset_for_disk(disk)
+#     if zfs_dataset:
+#         parent = zfs_dataset.rsplit("/", 1)[0] if "/" in zfs_dataset else ""
+#         new_dataset = f"{parent}/{new_disk_name}" if parent else new_disk_name
+#         run(
+#             ["zfs", "rename", zfs_dataset, new_dataset],
+#             f"rename ZFS dataset {zfs_dataset} to {new_dataset}",
+#             dry_run,
+#         )
+#         return
+
+#     print(
+#         f"  Skipping disk {disk}: could not determine whether it is on LVM or ZFS",
+#         file=sys.stderr,
+#     )
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Rename a Proxmox VM ID (disks, config file, jobs.cfg)."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only describe the changes that would be made; don't perform them.",
+    )
+    parser.add_argument("old_vm_id", help="Current VM ID")
+    parser.add_argument("new_vm_id", help="New VM ID")
+    args = parser.parse_args()
+
+    vmid = args.old_vm_id
+    new_vmid = args.new_vm_id
+    dry_run = args.dry_run
+
+    if dry_run:
+        print(f"=== DRY RUN: no changes will be made (VM {vmid} -> {new_vmid}) ===\n")
+
+    # Check if VM is running
+    vm_status = get_vm_status(vmid)
+    if vm_status == "running":
+        if dry_run:
+            print(f"[DRY-RUN] VM ID {vmid} is currently running. Would require stopping the VM before changing IDs.")
+        else:
+            print(
+                f"VM ID {vmid} is currently running. "
+                "Please stop the VM before attempting to change VM IDs."
+            )
+            sys.exit(2)
+
+    # Identify disks associated with the VM and rename them
+    disk_renamer = VmDiskRenamer(vmid, dry_run=dry_run)
+    # vm_disks = get_vm_disks(vmid)
+    # for disk in vm_disks:
+    #     new_disk_name = disk.replace(vmid, new_vmid)
+    #     print(f"{'Would rename' if dry_run else 'Renaming'} VM disk {disk} -> {new_disk_name}")
+    #     # rename_vm_disk(disk, new_disk_name, dry_run)
+    #     disk_renamer.rename_disk(disk, new_disk_name)
+    disk_renamer.rename_disks(new_vmid)
+
+    # Update VM configuration file (replace vmid references)
+    # update_vmid_references(old_conf, vmid, new_vmid, dry_run)
+    vm_config_updater = VmConfigUpdater(vmid, dry_run=dry_run)
+    vm_config_updater.update_vm_id(new_vmid)
+
+    # if dry_run:
+    #     print(f"[DRY-RUN] Would rename {old_conf} -> {new_conf}")
+    # elif old_conf.exists():
+    #     shutil.move(str(old_conf), str(new_conf))
+    #     print(f"Renamed {old_conf} -> {new_conf}")
+
+    # Update any jobs referencing the VM (lines containing "vmid", replace old id with new id)
+    # replace_string_references(JOBS_CFG, vmid, new_vmid, dry_run, line_filter="vmid")
+
+    if dry_run:
+        print("\n=== DRY RUN complete: no changes were made ===")
+
+
+if __name__ == "__main__":
+    main()
